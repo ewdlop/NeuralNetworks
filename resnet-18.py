@@ -207,7 +207,7 @@ class ResNet(nn.Module):
         
         # 全局平均池化和分類
         x = self.avgpool(x)  # 7x7 -> 1x1
-        x = torch.flatten(x, 1)  # 展平特徵圖
+        x = torch.flatten(x, 1)  # 展平特徵圖 
         return self.fc(x)  # 全連接層分類
 
 def resnet18(num_classes=1000):
