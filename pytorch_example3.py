@@ -175,7 +175,7 @@ class NeuralNetwork(nn.Module):
         super().__init__()
         
         # 展平层：将2D图像转换为1D向量
-        # (batch_size, 1, 28, 28) -> (batch_size, 784)
+        # (batch_size, 1, 28, 28) -> (batch_size, 784 = 28*28)
         self.flatten = nn.Flatten()
         
         # 定义线性层堆叠（全连接网络）
