@@ -1,0 +1,20 @@
+{
+  "model_name": "bnn-mnist-classifier",
+  "description": "\n    貝葉斯神經網絡模型用於MNIST手寫數字分類。\n    該模型使用變分推斷來學習參數的不確定性，並能夠提供預測的不確定性估計。\n    \n    特點：\n    - 使用貝葉斯神經網絡架構\n    - 輸入：784維特徵（28x28 MNIST圖像）\n    - 輸出：10個數字類別（0-9）\n    - 支持不確定性估計\n    ",
+  "architecture": "BayesianMLP",
+  "input_size": 784,
+  "hidden_sizes": [
+    400,
+    400
+  ],
+  "output_size": 10,
+  "prior": {
+    "type": "Gaussian",
+    "mu": 0.0,
+    "sigma": 1.0
+  },
+  "variational": {
+    "type": "Gaussian",
+    "parametrization": "mean-log_std"
+  }
+}
