@@ -6,6 +6,7 @@ from torch import nn
 from huggingface_hub import HfApi, create_repo
 import os
 import getpass
+import json
 
 class IntegrateAndFireNeuron(nn.Module):
     """
@@ -172,7 +173,7 @@ test_loader  = DataLoader(test_ds, batch_size=64, collate_fn=tonic.collation.Pad
 # 設置模型參數
 # 計算輸入特徵數：通道數 * 高度 * 寬度
 input_size = 2 * tonic.datasets.NMNIST.sensor_size[0] * tonic.datasets.NMNIST.sensor_size[1]  # 2 * 34 * 34 = 2312
-hidden_size = 100  # 隱藏層神經元數量
+hidden_size = 256  # 增加隱藏層神經元數量以提高模型容量
 output_size = 10   # 輸出類別數（數字 0-9）
 time_window = time_window_us // 100  # 時間窗口大小，與輸入轉換保持一致
 
@@ -188,9 +189,11 @@ print(f"隱藏層：{hidden_size} 個神經元")
 print(f"輸出層：{output_size} 個類別")
 print(f"時間窗口：{time_window} 個時間步")
 
-# 設置優化器和損失函數
-# Adam 優化器結合了動量和自適應學習率的優點
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+# 設置優化器和學習率調度器
+# Adam 優化器結合了動量和自適應學習率的優點，添加權重衰減以防止過擬合
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
+# 學習率調度器：當性能停滯時降低學習率
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2, verbose=True)
 
 # 自定義損失函數：計算預測類別與真實類別的不匹配率
 def spike_loss(predictions, targets):
@@ -211,19 +214,30 @@ def spike_loss(predictions, targets):
     targets = targets.long()
     
     # 使用交叉熵損失
-    return torch.nn.functional.cross_entropy(spike_counts, targets)
+    ce_loss = torch.nn.functional.cross_entropy(spike_counts, targets)
+    
+    # 添加稀疏性損失，鼓勵神經元只在必要時發放脈衝
+    sparsity_loss = torch.mean(predictions)
+    
+    # 總損失 = 交叉熵損失 + 稀疏性損失
+    total_loss = ce_loss + 0.1 * sparsity_loss
+    
+    return total_loss
 
 # 訓練循環
+# 初始化最佳準確率和早停計數器
+best_accuracy = 0.0
+patience = 5  # 早停耐心值
+patience_counter = 0
+
 # 每個 epoch 遍歷整個訓練數據集一次
-for epoch in range(1, 6):
+for epoch in range(1, 21):  # 增加訓練輪數以提高性能
     model.train()  # 設置模型為訓練模式
     total_loss = 0.0
+    correct = 0
+    total = 0
+    
     for frames, targets in train_loader:
-        # 打印數據形狀以進行調試
-        print(f"Frames shape: {frames.shape}")
-        print(f"Targets shape: {targets.shape}")
-        print(f"Targets dtype: {targets.dtype}")  # 打印目標標籤的數據類型
-        
         # 根據實際形狀處理數據
         if len(frames.shape) == 5:  # [批次大小, 時間步, 通道數, 高度, 寬度]
             B, T, C, H, W = frames.shape
@@ -245,40 +259,73 @@ for epoch in range(1, 6):
         out_spikes = model(x)  # 輸出形狀：[批次大小, 時間步, 輸出類別數]
         loss = spike_loss(out_spikes, y)  # 使用新的損失函數
         loss.backward()  # 反向傳播
+        
+        # 梯度裁剪，防止梯度爆炸
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        
         optimizer.step()  # 更新參數
 
         total_loss += loss.item()
-    print(f"Epoch {epoch}, Training error: {total_loss/len(train_loader):.4f}")
-
-# 評估模型
-model.eval()  # 設置模型為評估模式
-correct = 0
-total = 0
-with torch.no_grad():  # 禁用梯度計算
-    for frames, targets in test_loader:
-        # 根據實際形狀處理數據
-        if len(frames.shape) == 5:  # [批次大小, 時間步, 通道數, 高度, 寬度]
-            B, T, C, H, W = frames.shape
-            # 將通道、高度和寬度展平為一個特徵向量
-            x = frames.view(B, T, -1).to(device)
-        elif len(frames.shape) == 4:  # [批次大小, 時間步, 高度, 寬度]
-            B, T, H, W = frames.shape
-            x = frames.view(B, T, -1).to(device)  # 將高度和寬度展平
-        elif len(frames.shape) == 3:  # [批次大小, 時間步, 特徵數]
-            B, T, F = frames.shape
-            x = frames.to(device)
-        else:
-            raise ValueError(f"意外的數據形狀: {frames.shape}")
-            
-        y = targets.to(device)
-        out = model(x)
-        # 使用與訓練時相同的邏輯進行預測
-        spike_counts = out.sum(dim=1)  # [批次大小, 輸出類別數]
-        preds = spike_counts.argmax(dim=1)  # [批次大小]
+        
+        # 計算訓練準確率
+        spike_counts = out_spikes.sum(dim=1)
+        preds = spike_counts.argmax(dim=1)
         correct += (preds == y).sum().item()
         total += B
 
-print(f"Test accuracy: {correct/total:.4f}")
+    # 計算平均損失和準確率
+    avg_loss = total_loss / len(train_loader)
+    train_accuracy = correct / total
+    
+    # 更新學習率
+    scheduler.step(avg_loss)
+    
+    print(f"Epoch {epoch}, 訓練損失: {avg_loss:.4f}, 訓練準確率: {train_accuracy:.4f}")
+
+    # 評估模型
+    model.eval()  # 設置模型為評估模式
+    correct = 0
+    total = 0
+    with torch.no_grad():  # 禁用梯度計算
+        for frames, targets in test_loader:
+            # 根據實際形狀處理數據
+            if len(frames.shape) == 5:  # [批次大小, 時間步, 通道數, 高度, 寬度]
+                B, T, C, H, W = frames.shape
+                # 將通道、高度和寬度展平為一個特徵向量
+                x = frames.view(B, T, -1).to(device)
+            elif len(frames.shape) == 4:  # [批次大小, 時間步, 高度, 寬度]
+                B, T, H, W = frames.shape
+                x = frames.view(B, T, -1).to(device)  # 將高度和寬度展平
+            elif len(frames.shape) == 3:  # [批次大小, 時間步, 特徵數]
+                B, T, F = frames.shape
+                x = frames.to(device)
+            else:
+                raise ValueError(f"意外的數據形狀: {frames.shape}")
+                
+            y = targets.to(device)
+            out = model(x)
+            # 使用與訓練時相同的邏輯進行預測
+            spike_counts = out.sum(dim=1)  # [批次大小, 輸出類別數]
+            preds = spike_counts.argmax(dim=1)  # [批次大小]
+            correct += (preds == y).sum().item()
+            total += B
+
+    test_accuracy = correct / total
+    print(f"測試準確率: {test_accuracy:.4f}")
+
+    # 保存最佳模型
+    if test_accuracy > best_accuracy:
+        best_accuracy = test_accuracy
+        torch.save(model.state_dict(), 'best_spiking_neural_network.pth')
+        print(f"保存最佳模型，準確率：{best_accuracy:.4f}")
+        patience_counter = 0
+    else:
+        patience_counter += 1
+        if patience_counter >= patience:
+            print(f"提前停止訓練，{patience} 個 epoch 沒有改善")
+            break
+
+print(f"最佳測試準確率：{best_accuracy:.4f}")
 
 # 保存模型到本地
 # 只保存模型參數，不保存整個模型結構
@@ -293,11 +340,7 @@ def push_to_huggingface(model, model_name, username, token):
         model: 要保存的模型
         model_name: 模型名稱
         username: Hugging Face 用戶名
-    
-    步驟：
-    1. 創建新的模型倉庫
-    2. 保存模型到本地臨時目錄
-    3. 上傳模型文件到 Hugging Face
+        token: Hugging Face 訪問令牌
     """
     # 創建倉庫
     repo_name = f"{username}/{model_name}"
@@ -309,7 +352,19 @@ def push_to_huggingface(model, model_name, username, token):
     # 保存模型
     save_dir = "model_save"
     os.makedirs(save_dir, exist_ok=True)
-    model.save_pretrained(save_dir)
+    
+    # 保存模型狀態字典
+    torch.save(model.state_dict(), os.path.join(save_dir, "model.pt"))
+    
+    # 保存模型配置
+    config = {
+        "input_size": model.first_fully_connected.in_features,
+        "hidden_size": model.first_fully_connected.out_features,
+        "output_size": model.second_fully_connected.out_features,
+        "time_window": model.time_window
+    }
+    with open(os.path.join(save_dir, "config.json"), "w") as f:
+        json.dump(config, f)
 
     # 上傳到 Hugging Face
     api = HfApi()
@@ -317,7 +372,7 @@ def push_to_huggingface(model, model_name, username, token):
         folder_path=save_dir,
         repo_id=repo_name,
         repo_type="model",
-        token = token
+        token=token
     )
     print(f"模型已成功上傳到 https://huggingface.co/{repo_name}")
 

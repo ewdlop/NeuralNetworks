@@ -1,0 +1,8 @@
+{
+    "model_name": "spiking_neural_network",
+    "input_size": 2312,
+    "hidden_size": 100,
+    "output_size": 10,
+    "time_window": 20,
+    "description": "脈衝神經網路模型，用於 NMNIST 數據集分類"
+}
