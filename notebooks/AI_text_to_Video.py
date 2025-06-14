@@ -78,6 +78,16 @@ prompts_and_movements = [
     ("circle moving down-left", "circle", "down_left")  # 圓形向下左移動
 ]
 
+# 添加更多形狀和運動
+shapes = ["circle", "square", "triangle", "star", "heart"]
+complex_movements = [
+    "spiral_clockwise",
+    "wave_motion", 
+    "accelerating_right",
+    "bouncing_with_rotation",
+    "figure_eight"
+]
+
 # 定義一個函數來創建帶有移動形狀的圖像
 def create_image_with_moving_shape(size, frame_num, shape, direction):
     # 創建一個新的 RGB 圖像，指定大小和白色背景
@@ -175,19 +185,19 @@ class TextToVideoDataset(Dataset):
         # 返回轉換後的圖像和提示
         return image, prompt
 
-# 定義文本嵌入類
-class TextEmbedding(nn.Module):
-    # 構造函數方法，帶有 vocab_size 和 embed_size 參數
-    def __init__(self, vocab_size, embed_size):
-        # 調用父類構造函數
-        super(TextEmbedding, self).__init__()
-        # 初始化嵌入層
-        self.embedding = nn.Embedding(vocab_size, embed_size)
+# 使用預訓練模型替代簡單嵌入
+from transformers import BertModel, BertTokenizer
 
-    # 定義前向傳播方法
-    def forward(self, x):
-        # 返回輸入的嵌入表示
-        return self.embedding(x)
+class AdvancedTextEmbedding(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.bert = BertModel.from_pretrained('bert-base-uncased')
+        self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+    
+    def forward(self, text):
+        tokens = self.tokenizer(text, return_tensors='pt', padding=True)
+        outputs = self.bert(**tokens)
+        return outputs.last_hidden_state.mean(dim=1)  # 平均池化
 
 # 生成器類
 class Generator(nn.Module):
@@ -267,7 +277,7 @@ def encode_text(prompt):
     return torch.tensor([vocab[word] for word in prompt.split()])
 
 # 初始化模型、損失函數和優化器
-text_embedding = TextEmbedding(vocab_size, embed_size).to(device)  # 使用 vocab_size 和 embed_size 初始化 TextEmbedding 模型
+text_embedding = AdvancedTextEmbedding().to(device)  # 使用 AdvancedTextEmbedding 模型
 netG = Generator(embed_size).to(device)  # 使用 embed_size 初始化生成器模型
 netD = Discriminator().to(device)  # 初始化判別器模型
 criterion = nn.BCELoss().to(device)  # 二元交叉熵損失函數
@@ -297,7 +307,7 @@ for epoch in range(num_epochs):
 
         # 生成假數據
         noise = torch.randn(batch_size, 100).to(device)  # 生成隨機噪聲
-        text_embeds = torch.stack([text_embedding(encode_text(prompt).to(device)).mean(dim=0) for prompt in prompts])  # 將提示編碼為文本嵌入
+        text_embeds = torch.stack([text_embedding(prompt).to(device) for prompt in prompts])  # 將提示編碼為文本嵌入
         fake_data = netG(noise, text_embeds)  # 從噪聲和文本嵌入生成假數據
         labels = torch.zeros(batch_size, 1).to(device)  # 為假數據創建標籤（0）
         output = netD(fake_data.detach())  # 將假數據通過判別器進行前向傳播（detach 以避免梯度流回生成器）
@@ -328,7 +338,7 @@ def generate_video(text_prompt, num_frames=10):
     os.makedirs(f'generated_video_{text_prompt.replace(" ", "_")}', exist_ok=True)
 
     # 將文本提示編碼為文本嵌入張量
-    text_embed = text_embedding(encode_text(text_prompt).to(device)).mean(dim=0).unsqueeze(0)
+    text_embed = text_embedding(prompt).to(device).unsqueeze(0)
 
     # 為視頻生成幀
     for frame_num in range(num_frames):
